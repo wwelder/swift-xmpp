@@ -25,11 +25,11 @@ import Foundation
 /// check is the classic SCRAM implementation bug — it turns mutual
 /// authentication back into one-way.
 public struct SCRAM {
-    enum Variant: String {
+    public enum Variant: String {
         case sha1 = "SCRAM-SHA-1"
         case sha256 = "SCRAM-SHA-256"
 
-        var digestLength: Int {
+        public var digestLength: Int {
             switch self {
             case .sha1: Insecure.SHA1.byteCount
             case .sha256: SHA256.byteCount
@@ -42,7 +42,7 @@ public struct SCRAM {
         case unsupportedIteration(Int)
         case serverSignatureMismatch
 
-        var errorDescription: String? {
+        public var errorDescription: String? {
             switch self {
             case let .malformedChallenge(detail):
                 "The server's SCRAM challenge was malformed: \(detail)."
@@ -56,14 +56,14 @@ public struct SCRAM {
         }
     }
 
-    let variant: Variant
+    public let variant: Variant
     private let username: String
     private let password: String
     private let clientNonce: String
     private var clientFirstBare = ""
     private var expectedServerSignature = Data()
 
-    init(variant: Variant, username: String, password: String, nonce: String? = nil) {
+    public init(variant: Variant, username: String, password: String, nonce: String? = nil) {
         self.variant = variant
         self.username = username
         self.password = password
@@ -74,13 +74,13 @@ public struct SCRAM {
 
     /// The `client-first-message`. `n,,` is the GS2 header for "no channel
     /// binding, no authzid".
-    mutating func clientFirstMessage() -> String {
+    public mutating func clientFirstMessage() -> String {
         clientFirstBare = "n=\(Self.saslPrep(username)),r=\(clientNonce)"
         return "n,," + clientFirstBare
     }
 
     /// Consumes `server-first-message` and produces `client-final-message`.
-    mutating func handle(challenge: String) throws -> String {
+    public mutating func handle(challenge: String) throws -> String {
         let parts = Self.attributes(of: challenge)
         guard let combinedNonce = parts["r"], combinedNonce.hasPrefix(clientNonce) else {
             // A server that does not echo our nonce cannot be replayed against.
@@ -116,7 +116,7 @@ public struct SCRAM {
     }
 
     /// Verifies `server-final-message`. Not optional — see the type comment.
-    func handle(finalMessage: String) throws {
+    public func handle(finalMessage: String) throws {
         let parts = Self.attributes(of: finalMessage)
         if let error = parts["e"] {
             throw Failure.malformedChallenge(error)
@@ -166,13 +166,13 @@ public struct SCRAM {
     /// username (RFC 5802 §5.1). Full SASLprep normalisation is deliberately
     /// not attempted: getting it half-right is worse than being explicit that
     /// non-ASCII usernames need the real profile.
-    static func saslPrep(_ value: String) -> String {
+    public static func saslPrep(_ value: String) -> String {
         value
             .replacingOccurrences(of: "=", with: "=3D")
             .replacingOccurrences(of: ",", with: "=2C")
     }
 
-    static func attributes(of message: String) -> [String: String] {
+    public static func attributes(of message: String) -> [String: String] {
         var out: [String: String] = [:]
         for field in message.split(separator: ",") {
             guard let split = field.firstIndex(of: "=") else { continue }

@@ -22,13 +22,13 @@ import Foundation
 /// predefined entities. That is why this can be a plain struct and the parser
 /// can be a few hundred lines rather than a dependency.
 public struct Stanza {
-    var name: String
-    var attributes: [String: String]
-    var children: [Stanza]
+    public var name: String
+    public var attributes: [String: String]
+    public var children: [Stanza]
     /// Character data directly inside this element.
-    var text: String
+    public var text: String
 
-    init(
+    public init(
         _ name: String,
         _ attributes: [String: String] = [:],
         text: String = "",
@@ -42,28 +42,28 @@ public struct Stanza {
 
     // MARK: reading
 
-    subscript(attribute: String) -> String? { attributes[attribute] }
+    public subscript(attribute: String) -> String? { attributes[attribute] }
 
-    var id: String? { attributes["id"] }
-    var type: String? { attributes["type"] }
-    var from: String? { attributes["from"] }
-    var to: String? { attributes["to"] }
+    public var id: String? { attributes["id"] }
+    public var type: String? { attributes["type"] }
+    public var from: String? { attributes["from"] }
+    public var to: String? { attributes["to"] }
     /// The element's own namespace, as declared on it.
-    var xmlns: String? { attributes["xmlns"] }
+    public var xmlns: String? { attributes["xmlns"] }
 
-    func child(_ name: String, xmlns: String? = nil) -> Stanza? {
+    public func child(_ name: String, xmlns: String? = nil) -> Stanza? {
         children.first { $0.name == name && (xmlns == nil || $0.xmlns == xmlns) }
     }
 
-    func childrenNamed(_ name: String, xmlns: String? = nil) -> [Stanza] {
+    public func childrenNamed(_ name: String, xmlns: String? = nil) -> [Stanza] {
         children.filter { $0.name == name && (xmlns == nil || $0.xmlns == xmlns) }
     }
 
-    func childText(_ name: String) -> String? { child(name)?.text }
+    public func childText(_ name: String) -> String? { child(name)?.text }
 
     /// Depth-first search for the first descendant in a namespace. Handy for
     /// stream features, where the nesting varies between servers.
-    func firstDescendant(xmlns: String) -> Stanza? {
+    public func firstDescendant(xmlns: String) -> Stanza? {
         for child in children {
             if child.xmlns == xmlns { return child }
             if let found = child.firstDescendant(xmlns: xmlns) { return found }
@@ -74,7 +74,7 @@ public struct Stanza {
     // MARK: writing
 
     /// Serialised form, with the five predefined entities escaped per RFC 6120.
-    var xml: String {
+    public var xml: String {
         var out = "<" + name
         for key in attributes.keys.sorted() {
             out += " \(key)='\(Self.escape(attributes[key]!, inAttribute: true))'"
@@ -88,7 +88,7 @@ public struct Stanza {
         return out + "</\(name)>"
     }
 
-    static func escape(_ value: String, inAttribute: Bool) -> String {
+    public static func escape(_ value: String, inAttribute: Bool) -> String {
         var out = value
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
@@ -101,7 +101,7 @@ public struct Stanza {
         return out
     }
 
-    static func unescape(_ value: String) -> String {
+    public static func unescape(_ value: String) -> String {
         guard value.contains("&") else { return value }
         return value
             .replacingOccurrences(of: "&lt;", with: "<")

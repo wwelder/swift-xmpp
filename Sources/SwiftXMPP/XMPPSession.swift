@@ -23,6 +23,8 @@ import Foundation
 /// order is the specification's, and a linear read of this file is a linear
 /// read of the RFC.
 public actor XMPPSession {
+    public init() {}
+
     struct Namespace {
         static let stream = "http://etherx.jabber.org/streams"
         static let tls = "urn:ietf:params:xml:ns:xmpp-tls"
@@ -39,7 +41,7 @@ public actor XMPPSession {
         case insecureServer
         case unexpected(String)
 
-        var errorDescription: String? {
+        public var errorDescription: String? {
             switch self {
             case let .noSharedMechanism(offered):
                 offered.isEmpty
@@ -68,11 +70,11 @@ public actor XMPPSession {
     private var elementContinuations: [CheckedContinuation<Stanza, Error>] = []
     private var iqContinuations: [String: CheckedContinuation<Stanza, Error>] = [:]
 
-    private(set) var boundJID: String?
+    public private(set) var boundJID: String?
 
     // MARK: negotiation
 
-    func connect(
+    public func connect(
         jid: JID, password: String, pinnedCertificateSHA256: String? = nil
     ) async throws -> ServerCapabilities {
         transport.pinnedCertificateSHA256 = pinnedCertificateSHA256
@@ -103,7 +105,7 @@ public actor XMPPSession {
         return try await discoverCapabilities(domain: jid.domain, mechanisms: mechanisms)
     }
 
-    func disconnect() {
+    public func disconnect() {
         transport.send("</stream:stream>")
         transport.close()
     }
@@ -283,10 +285,10 @@ public actor XMPPSession {
 
 /// A bare JID. Resource is assigned by the server during binding.
 public struct JID {
-    let local: String
-    let domain: String
+    public let local: String
+    public let domain: String
 
-    init?(_ raw: String) {
+    public init?(_ raw: String) {
         let parts = raw.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
         guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
         local = String(parts[0])

@@ -23,13 +23,19 @@ import Foundation
 /// written for and for one it has never seen.
 public struct ServerCapabilities: Equatable {
     /// SASL mechanisms from the stream features, in the order the server listed them.
-    let saslMechanisms: [String]
+    public let saslMechanisms: [String]
     /// Service JIDs from disco#items on the server domain.
-    let services: [String]
+    public let services: [String]
     /// Feature vars from disco#info on the server domain.
-    let features: [String]
+    public let features: [String]
 
-    static let unknown = ServerCapabilities(saslMechanisms: [], services: [], features: [])
+    public init(saslMechanisms: [String], services: [String], features: [String]) {
+        self.saslMechanisms = saslMechanisms
+        self.services = services
+        self.features = features
+    }
+
+    public static let unknown = ServerCapabilities(saslMechanisms: [], services: [], features: [])
 }
 
 /// How the user proves who they are. Chosen from what the server offers, never
@@ -57,7 +63,7 @@ extension ServerCapabilities {
     private static let oauthMechanisms = ["OAUTHBEARER", "X-OAUTH2"]
 
     /// The entire login decision. Note there is no hostname in it.
-    var authMethod: AuthMethod {
+    public var authMethod: AuthMethod {
         if let scram = Self.scramPreference.first(where: { saslMechanisms.contains($0) }) {
             return .password(mechanism: scram)
         }
