@@ -173,7 +173,8 @@ public actor XMPPSession {
     // MARK: negotiation
 
     public func connect(
-        jid: JID, credential: Credential, pinnedCertificateSHA256: String? = nil
+        jid: JID, credential: Credential, pinnedCertificateSHA256: String? = nil,
+        connectHost: String? = nil
     ) async throws -> ServerCapabilities {
         self.jid = jid
         self.credential = credential
@@ -189,7 +190,11 @@ public actor XMPPSession {
             Task { await self?.handleTransportFailure(error) }
         }
 
-        try await transport.connect(host: jid.domain, port: 5222, directTLS: false)
+        // The stream is always opened to the JID's domain (the XMPP realm), but
+        // the TCP connection may go to a different host — SRV records, a
+        // hosting provider, or a local test rig where the domain does not
+        // resolve. `connectHost` is that override; without it, host == domain.
+        try await transport.connect(host: connectHost ?? jid.domain, port: 5222, directTLS: false)
         try await openStream(to: jid.domain)
 
         // RFC 6120 §5: if the server offers STARTTLS, take it. We do not
