@@ -33,6 +33,7 @@ public actor XMPPSession {
         static let client = "jabber:client"
         static let discoInfo = "http://jabber.org/protocol/disco#info"
         static let discoItems = "http://jabber.org/protocol/disco#items"
+        static let streamManagement = StreamManagement.namespace
     }
 
     enum Failure: Error, LocalizedError {
@@ -64,6 +65,12 @@ public actor XMPPSession {
 
     private var features: Stanza?
     private var isSecure = false
+    private var management = StreamManagement()
+
+    /// Whether the server will hold our session open across a dropped
+    /// connection. Callers show this: "reconnecting" and "signed out" are very
+    /// different things to a user watching a spinner.
+    public var canResume: Bool { management.resumeToken != nil }
 
     /// Elements the negotiation is waiting for, and IQ replies by id.
     private var elementWaiters: [(Stanza) -> Bool] = []
@@ -130,6 +137,7 @@ public actor XMPPSession {
         try await authenticate(jid: jid, credential: credential, mechanisms: mechanisms)
         try await openStream(to: jid.domain) // §6.4.6: restart after SASL success
         try await bindResource()
+        await enableStreamManagement()
 
         return try await discoverCapabilities(domain: jid.domain, mechanisms: mechanisms)
     }
@@ -261,6 +269,28 @@ public actor XMPPSession {
         ourBareJID = jid.split(separator: "/").first.map(String.init) ?? jid
     }
 
+    /// XEP-0198. Requested after binding, because a managed stream counts
+    /// stanzas and there are none before the resource exists.
+    ///
+    /// A server that does not offer it is not an error: the session simply has
+    /// no safety net, which is how every XMPP client worked for a decade.
+    private func enableStreamManagement() async {
+        guard features?.firstDescendant(xmlns: Namespace.streamManagement) != nil else { return }
+        transport.send(management.enableRequest)
+        guard let reply = try? await waitForElement({
+            $0.xmlns == Namespace.streamManagement
+        }), reply.name == "enabled" else { return }
+        management.handleEnabled(reply)
+    }
+
+    /// Ask the server to confirm what it has handled. Worth doing before the
+    /// app goes to the background: the answer decides whether a message the
+    /// user just sent is safe or needs resending.
+    public func requestAcknowledgement() {
+        guard management.isEnabled else { return }
+        transport.send(management.ackRequest)
+    }
+
     private func discoverCapabilities(
         domain: String, mechanisms: [String]
     ) async throws -> ServerCapabilities {
@@ -294,7 +324,7 @@ public actor XMPPSession {
         let reply = try await request(to: ourBareJID, query: Stanza("query", ["xmlns": "jabber:iq:roster"]))
         let contacts = reply.child("query")?.children.compactMap(Contact.init) ?? []
         emit(.rosterLoaded(contacts))
-        transport.send(Stanza("presence").xml)
+        sendCounted(Stanza("presence"))
     }
 
     /// Send a chat message. Returns the id it was sent with, so a caller can
@@ -307,21 +337,37 @@ public actor XMPPSession {
             ["to": jid, "type": "chat", "id": id, "from": ourBareJID],
             children: [Stanza("body", text: body)]
         )
-        transport.send(stanza.xml)
+        sendCounted(stanza)
+        // Ask the server to confirm it. Without this the client knows only that
+        // the bytes were written to a socket, which is not the same as the
+        // message existing anywhere else — and the difference is exactly what
+        // stream management was added to close.
+        requestAcknowledgement()
         return Message(from: stanza, ourBareJID: ourBareJID)
     }
 
     /// Ask to see a contact's presence. They must accept; `pendingOut` on the
     /// roster entry is how a client shows that it is waiting.
     public func requestSubscription(to jid: String) {
-        transport.send(Stanza("presence", ["to": jid, "type": "subscribe"]).xml)
+        sendCounted(Stanza("presence", ["to": jid, "type": "subscribe"]))
     }
 
     /// Answer someone else's request.
     public func respondToSubscription(from jid: String, accept: Bool) {
-        transport.send(
-            Stanza("presence", ["to": jid, "type": accept ? "subscribed" : "unsubscribed"]).xml
+        sendCounted(
+            Stanza("presence", ["to": jid, "type": accept ? "subscribed" : "unsubscribed"])
         )
+    }
+
+    /// Send a stanza, keeping a copy until the server acknowledges it. Only
+    /// stanzas go through here; stream management's own elements must not be
+    /// counted or they desynchronise the two sides.
+    private func sendCounted(_ stanza: Stanza) {
+        let serialised = stanza.xml
+        transport.send(serialised)
+        if management.isEnabled, StreamManagement.isCountable(stanza) {
+            management.countSent(serialised)
+        }
     }
 
     private func request(to jid: String, query: Stanza) async throws -> Stanza {
@@ -353,6 +399,26 @@ public actor XMPPSession {
     }
 
     private func deliver(_ element: Stanza) {
+        // Only the two elements that are pure bookkeeping are handled here and
+        // dropped. Everything else in this namespace - `enabled`, `resumed`,
+        // `failed` - is part of a negotiation something is waiting for, and
+        // swallowing it deadlocks the session.
+        if element.xmlns == Namespace.streamManagement,
+           element.name == "r" || element.name == "a" {
+            if element.name == "r" {
+                // The server wants to know where we are. Answering promptly is
+                // what keeps its own queue from growing.
+                transport.send(management.ackResponse)
+            } else {
+                management.acknowledge(through: UInt32(element["h"] ?? "") ?? 0)
+            }
+            return
+        }
+        // Counted before it is acted on: `h` means "received and handled", and
+        // a stanza that throws on the way to a handler was still received.
+        if management.isEnabled, StreamManagement.isCountable(element) {
+            management.countReceived()
+        }
         if element.name == "iq", let id = element.id,
            let continuation = iqContinuations.removeValue(forKey: id) {
             if element.type == "error" {
