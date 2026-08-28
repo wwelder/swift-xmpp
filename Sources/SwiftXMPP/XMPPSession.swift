@@ -499,10 +499,16 @@ public actor XMPPSession {
     }
 
     private func request(to jid: String, query: Stanza) async throws -> Stanza {
+        try await sendIQ(type: "get", to: jid, child: query)
+    }
+
+    /// Send an IQ and await its reply. `to` nil means the server. Used by the
+    /// PEP layer, which is how OMEMO publishes and fetches keys.
+    func sendIQ(type: String, to jid: String? = nil, child: Stanza) async throws -> Stanza {
         let id = UUID().uuidString
-        transport.send(
-            Stanza("iq", ["type": "get", "id": id, "to": jid], children: [query]).xml
-        )
+        var attrs = ["type": type, "id": id]
+        if let jid { attrs["to"] = jid }
+        transport.send(Stanza("iq", attrs, children: [child]).xml)
         return try await waitForIQ(id: id)
     }
 
