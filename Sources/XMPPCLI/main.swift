@@ -54,7 +54,8 @@ Task {
         if let to = sendTo, let body = sendBody {
             // Give the peer a moment to publish its bundle first.
             try await Task.sleep(for: .seconds(3))
-            _ = try await session.sendEncrypted(body, to: to)
+            let fallback = ProcessInfo.processInfo.environment["OMEMO_FALLBACK"] == "1"
+            _ = try await session.sendEncrypted(body, to: to, plaintextFallback: fallback)
             FileHandle.standardError.write("SENT_ENCRYPTED to=\(to)\n".data(using: .utf8)!)
         }
 

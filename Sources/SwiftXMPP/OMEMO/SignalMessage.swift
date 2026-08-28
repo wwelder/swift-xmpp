@@ -140,13 +140,15 @@ struct PreKeySignalMessage: Equatable {
         guard let version = data.first else { throw SignalMessage.ParseError.tooShort }
         guard version >> 4 == 3 else { throw SignalMessage.ParseError.unsupportedVersion(version) }
         let fields = try Protobuf.decode(Data(data.dropFirst()))
-        guard let registrationId = fields.varint(5),
-              let signedPreKeyId = fields.varint(6),
+        // Field 5 (registrationId) is "unused" in the oldmemo key exchange and
+        // real clients (python-omemo, Dino) omit it. We never read it on the
+        // responder side, so a missing field 5 is not malformed — default it.
+        guard let signedPreKeyId = fields.varint(6),
               let baseKey = fields.bytes(2).flatMap(SignalWire.publicKey(from:)),
               let identityKey = fields.bytes(3).flatMap(SignalWire.publicKey(from:)),
               let message = fields.bytes(4) else { throw SignalMessage.ParseError.malformed }
         return PreKeySignalMessage(
-            registrationId: UInt32(truncatingIfNeeded: registrationId),
+            registrationId: UInt32(truncatingIfNeeded: fields.varint(5) ?? 0),
             preKeyId: fields.varint(1).map { UInt32(truncatingIfNeeded: $0) },
             signedPreKeyId: UInt32(truncatingIfNeeded: signedPreKeyId),
             baseKey: baseKey,

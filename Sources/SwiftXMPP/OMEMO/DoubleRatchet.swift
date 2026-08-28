@@ -242,7 +242,7 @@ struct DoubleRatchet {
         let derived = dh.hkdfDerivedSymmetricKey(
             using: SHA256.self,
             salt: rootKey.withUnsafeBytes { Data($0) },
-            sharedInfo: Data("OMEMO Ratchet".utf8),
+            sharedInfo: Data("WhisperRatchet".utf8), // libsignal RootKey info, verbatim
             outputByteCount: 64
         )
         let bytes = derived.withUnsafeBytes { Data($0) }
@@ -272,14 +272,15 @@ struct DoubleRatchet {
     }
 
     /// A message key expands to an AES key, a MAC key and an IV, the way legacy
-    /// OMEMO derives them: HKDF with an empty salt and a fixed info string.
+    /// OMEMO derives them: HKDF-SHA-256 with a 32-byte zero salt and libsignal's
+    /// "WhisperMessageKeys" info, split 32 (cipher) / 32 (mac) / 16 (iv).
     private static func messageKeyMaterial(
         _ messageKey: SymmetricKey
     ) -> (cipherKey: Data, macKey: SymmetricKey, iv: Data) {
         let expanded = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: messageKey,
-            salt: Data(),
-            info: Data("OMEMO Message Key Material".utf8),
+            salt: Data(repeating: 0, count: 32),
+            info: Data("WhisperMessageKeys".utf8),
             outputByteCount: 80
         ).withUnsafeBytes { Data($0) }
         return (

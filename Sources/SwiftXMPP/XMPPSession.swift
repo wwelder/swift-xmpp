@@ -72,6 +72,28 @@ public actor XMPPSession {
     private var transport = StreamTransport()
     private var parser = StreamParser()
 
+    /// Raw bytes from the transport, in arrival order. A Task-per-read would let
+    /// the actor run reads out of order and corrupt a stanza split across TCP
+    /// reads (a real OMEMO bundle is always split); an AsyncStream preserves the
+    /// order the socket produced.
+    private var byteStream: AsyncStream<Data>?
+    private var byteContinuation: AsyncStream<Data>.Continuation?
+    private var byteConsumer: Task<Void, Never>?
+
+    private func startBytePipeline() -> AsyncStream<Data>.Continuation {
+        byteConsumer?.cancel()
+        var captured: AsyncStream<Data>.Continuation!
+        let stream = AsyncStream<Data> { continuation in captured = continuation }
+        byteStream = stream
+        byteContinuation = captured
+        byteConsumer = Task { [weak self] in
+            for await data in stream {
+                await self?.ingest(data)
+            }
+        }
+        return captured
+    }
+
     private var features: Stanza?
     private var isSecure = false
     private var management = StreamManagement()
@@ -158,9 +180,11 @@ public actor XMPPSession {
         pin = pinnedCertificateSHA256
         deliberatelyClosed = false
         transport.pinnedCertificateSHA256 = pinnedCertificateSHA256
-        transport.onBytes = { [weak self] data in
-            Task { await self?.ingest(data) }
-        }
+        let bytes = startBytePipeline()
+        // yield() is thread-safe and order-preserving; calling it directly on
+        // the transport thread (no Task, no actor hop) is what keeps a stanza
+        // split across reads in one piece.
+        transport.onBytes = { data in bytes.yield(data) }
         transport.onError = { [weak self] error in
             Task { await self?.handleTransportFailure(error) }
         }
@@ -670,9 +694,8 @@ public actor XMPPSession {
         transport.close()
         transport = StreamTransport()
         transport.pinnedCertificateSHA256 = pin
-        transport.onBytes = { [weak self] data in
-            Task { await self?.ingest(data) }
-        }
+        let bytes = startBytePipeline()
+        transport.onBytes = { data in bytes.yield(data) }
         transport.onError = { [weak self] error in
             Task { await self?.handleTransportFailure(error) }
         }

@@ -69,7 +69,8 @@ final class OMEMOWireTests: XCTestCase {
                 .init(deviceID: 10, data: Data(repeating: 0x11, count: 40), isPreKey: true),
                 .init(deviceID: 20, data: Data(repeating: 0x22, count: 40), isPreKey: false),
             ],
-            payload: Data(repeating: 0x33, count: 24)
+            payload: Data(repeating: 0x33, count: 24),
+            iv: Data(repeating: 0x44, count: 12)
         )
         let parsed = EncryptedElement.parse(message.element())
         XCTAssertEqual(parsed?.senderDeviceID, 5)
@@ -78,6 +79,7 @@ final class OMEMOWireTests: XCTestCase {
         XCTAssertEqual(parsed?.keys.first?.isPreKey, true)
         XCTAssertEqual(parsed?.keys.last?.isPreKey, false)
         XCTAssertEqual(parsed?.payload, message.payload)
+        XCTAssertEqual(parsed?.iv, message.iv)
     }
 
     /// A key-transport message carries keys and no body, used to start or heal
@@ -85,7 +87,7 @@ final class OMEMOWireTests: XCTestCase {
     func testKeyTransportMessageHasNoPayload() {
         let message = EncryptedElement.Message(
             senderDeviceID: 1, keys: [.init(deviceID: 2, data: Data(count: 40), isPreKey: false)],
-            payload: nil
+            payload: nil, iv: nil
         )
         XCTAssertNil(message.element().child("payload"))
         XCTAssertNil(EncryptedElement.parse(message.element())?.payload)
@@ -95,15 +97,38 @@ final class OMEMOWireTests: XCTestCase {
     /// ratchet would transport recovers the body exactly.
     func testBodyEncryptionRoundTrip() throws {
         let plaintext = Data("secret message".utf8)
-        let (payload, keyAndTag) = try EncryptedElement.encryptBody(plaintext)
+        let (payload, iv, keyAndTag) = try EncryptedElement.encryptBody(plaintext)
         XCTAssertEqual(keyAndTag.count, 32) // 16-byte key + 16-byte tag
-        XCTAssertEqual(try EncryptedElement.decryptBody(payload: payload, keyAndTag: keyAndTag), plaintext)
+        XCTAssertEqual(iv.count, 12) // 12-byte GCM nonce, carried in <header><iv>
+        XCTAssertEqual(try EncryptedElement.decryptBody(payload: payload, iv: iv, keyAndTag: keyAndTag), plaintext)
     }
 
     func testBodyDecryptionRejectsAWrongKey() throws {
-        let (payload, _) = try EncryptedElement.encryptBody(Data("x".utf8))
+        let (payload, iv, _) = try EncryptedElement.encryptBody(Data("x".utf8))
         XCTAssertThrowsError(
-            try EncryptedElement.decryptBody(payload: payload, keyAndTag: Data(repeating: 0, count: 32))
+            try EncryptedElement.decryptBody(payload: payload, iv: iv, keyAndTag: Data(repeating: 0, count: 32))
         )
+    }
+
+    /// Interop invariant: the oldmemo key exchange leaves field 5 (registrationId,
+    /// "unused") unset, and real clients (python-omemo, Dino) omit it. Parsing
+    /// must accept its absence rather than treat the message as malformed — we
+    /// never read registrationId on the responder side.
+    func testPreKeyMessageParsesWithoutRegistrationId() throws {
+        // A key exchange with fields 1,2,3,4,6 present and field 5 absent, exactly
+        // as python-omemo serializes it.
+        var proto = Protobuf.field(1, varint: 42)                                  // pk_id
+        proto += Protobuf.field(6, varint: 7)                                      // spk_id
+        proto += Protobuf.field(2, bytes: SignalWire.serialize(publicKey: Data(repeating: 0xAB, count: 32))) // ek
+        proto += Protobuf.field(3, bytes: SignalWire.serialize(publicKey: Data(repeating: 0xCD, count: 32))) // ik
+        proto += Protobuf.field(4, bytes: Data(repeating: 0xEE, count: 10))        // message
+        let blob = Data([SignalWire.version]) + proto
+
+        let parsed = try PreKeySignalMessage.parse(blob)
+        XCTAssertEqual(parsed.registrationId, 0)      // absent -> defaulted, not an error
+        XCTAssertEqual(parsed.preKeyId, 42)
+        XCTAssertEqual(parsed.signedPreKeyId, 7)
+        XCTAssertEqual(parsed.baseKey, Data(repeating: 0xAB, count: 32))
+        XCTAssertEqual(parsed.identityKey, Data(repeating: 0xCD, count: 32))
     }
 }

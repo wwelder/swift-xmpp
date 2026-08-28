@@ -88,7 +88,10 @@ public actor OMEMOEngine {
             signedPreKeyPublic: SignalWire.serialize(publicKey: signedPreKey.publicKey.rawRepresentation),
             signedPreKeySignature: try identity.sign(SignalWire.serialize(publicKey: signedPreKey.publicKey.rawRepresentation)),
             identityKey: SignalWire.serialize(publicKey: identity.publicKey),
-            preKeys: oneTimePreKeys.map { ($0.key, $0.value.publicKey.rawRepresentation) }
+            // Every public key in a bundle travels in libsignal network format
+            // (0x05-prefixed), one-time prekeys included; a bare 32-byte prekey
+            // makes real clients reject the whole bundle at parse time.
+            preKeys: oneTimePreKeys.map { ($0.key, SignalWire.serialize(publicKey: $0.value.publicKey.rawRepresentation)) }
         )
     }
 
@@ -99,7 +102,7 @@ public actor OMEMOEngine {
     public func encrypt(_ plaintext: Data, for jid: String) async throws -> EncryptedElement.Message {
         guard let source = bundleSource else { throw OMEMOError.malformedMessage }
         let devices = try await source.deviceIDs(for: jid)
-        let (payload, keyAndTag) = try EncryptedElement.encryptBody(plaintext)
+        let (payload, iv, keyAndTag) = try EncryptedElement.encryptBody(plaintext)
 
         var keys: [EncryptedElement.Key] = []
         for device in devices {
@@ -137,7 +140,7 @@ public actor OMEMOEngine {
             keys.append(.init(deviceID: device, data: blob, isPreKey: isPreKey))
         }
 
-        return EncryptedElement.Message(senderDeviceID: deviceID, keys: keys, payload: payload)
+        return EncryptedElement.Message(senderDeviceID: deviceID, keys: keys, payload: payload, iv: iv)
     }
 
     // MARK: decrypting
@@ -173,8 +176,8 @@ public actor OMEMOEngine {
             sessions[sessionKey] = ratchet
         }
 
-        guard let payload = message.payload else { return nil } // key-transport
-        return try EncryptedElement.decryptBody(payload: payload, keyAndTag: keyAndTag)
+        guard let payload = message.payload, let iv = message.iv else { return nil } // key-transport
+        return try EncryptedElement.decryptBody(payload: payload, iv: iv, keyAndTag: keyAndTag)
     }
 
     // MARK: sessions

@@ -44,20 +44,32 @@ public enum EncryptedElement {
         /// The GCM-encrypted body. Absent for a key-transport message, which
         /// carries only keys (used to start or heal a session silently).
         public let payload: Data?
-        public init(senderDeviceID: UInt32, keys: [Key], payload: Data?) {
-            self.senderDeviceID = senderDeviceID; self.keys = keys; self.payload = payload
+        /// The 12-byte AES-GCM nonce for the payload. Legacy OMEMO carries it in
+        /// the header's `<iv>`, not appended to the ciphertext; a key-transport
+        /// message with no payload has none.
+        public let iv: Data?
+        public init(senderDeviceID: UInt32, keys: [Key], payload: Data?, iv: Data?) {
+            self.senderDeviceID = senderDeviceID; self.keys = keys
+            self.payload = payload; self.iv = iv
         }
 
         public func element() -> Stanza {
+            var headerChildren: [Stanza] = keys.map { key in
+                var attrs = ["rid": String(key.deviceID)]
+                if key.isPreKey { attrs["prekey"] = "true" }
+                return Stanza("key", attrs, text: key.data.base64EncodedString())
+            }
+            // The <iv> lives inside <header>, after the keys (Conversations order;
+            // the schema's `all` group also accepts any order). Required whenever
+            // there is a payload to decrypt.
+            if let iv {
+                headerChildren.append(Stanza("iv", text: iv.base64EncodedString()))
+            }
             var children: [Stanza] = [
-                Stanza("header", ["sid": String(senderDeviceID)], children: keys.map { key in
-                    var attrs = ["rid": String(key.deviceID)]
-                    if key.isPreKey { attrs["prekey"] = "true" }
-                    return Stanza("key", attrs, text: key.data.base64EncodedString())
-                }),
+                Stanza("header", ["sid": String(senderDeviceID)], children: headerChildren),
             ]
             if let payload {
-                children.insert(Stanza("payload", text: payload.base64EncodedString()), at: 1)
+                children.append(Stanza("payload", text: payload.base64EncodedString()))
             }
             return Stanza("encrypted", ["xmlns": OMEMONamespace.encrypted], children: children)
         }
@@ -69,28 +81,25 @@ public enum EncryptedElement {
     /// in `<payload>` and the 16-byte key+tag the recipient recovers through
     /// their ratchet. libsignal/OMEMO appends the GCM tag to the key, not to the
     /// ciphertext, so both are recovered together on decrypt.
-    static func encryptBody(_ plaintext: Data) throws -> (payload: Data, keyAndTag: Data) {
+    static func encryptBody(_ plaintext: Data) throws -> (payload: Data, iv: Data, keyAndTag: Data) {
         let key = SymmetricKey(size: .bits128)
         let sealed = try AES.GCM.seal(plaintext, using: key)
         let keyData = key.withUnsafeBytes { Data($0) }
-        return (sealed.ciphertext + sealed.nonce.withUnsafeBytes { Data($0) },
+        // Wire split: <payload> is the bare ciphertext, <iv> is the 12-byte
+        // nonce, and the 16-byte tag rides with the key in the per-device blob.
+        return (sealed.ciphertext,
+                sealed.nonce.withUnsafeBytes { Data($0) },
                 keyData + Data(sealed.tag))
     }
 
-    /// Recover the body given the ciphertext and the key+tag the ratchet
-    /// produced.
-    static func decryptBody(payload: Data, keyAndTag: Data) throws -> Data {
+    /// Recover the body given the ciphertext, the header IV, and the key+tag the
+    /// ratchet produced.
+    static func decryptBody(payload: Data, iv: Data, keyAndTag: Data) throws -> Data {
         guard keyAndTag.count == 32 else { throw OMEMOError.malformedMessage }
         let key = SymmetricKey(data: keyAndTag.prefix(16))
         let tag = keyAndTag.suffix(16)
-        // Our own encryptBody appends a 12-byte nonce after the ciphertext.
-        // Other clients that use a fixed nonce omit it; both are handled by
-        // treating a trailing 12 bytes as the nonce when present.
-        guard payload.count >= 12 else { throw OMEMOError.malformedMessage }
-        let ciphertext = payload.prefix(payload.count - 12)
-        let nonce = payload.suffix(12)
         let box = try AES.GCM.SealedBox(
-            nonce: AES.GCM.Nonce(data: nonce), ciphertext: ciphertext, tag: tag
+            nonce: AES.GCM.Nonce(data: iv), ciphertext: payload, tag: tag
         )
         return try AES.GCM.open(box, using: key)
     }
@@ -104,6 +113,7 @@ public enum EncryptedElement {
             return Key(deviceID: rid, data: data, isPreKey: element["prekey"] == "true" || element["prekey"] == "1")
         }
         let payload = encrypted.childText("payload").flatMap { Data(base64Encoded: $0) }
-        return Message(senderDeviceID: sid, keys: keys, payload: payload)
+        let iv = header.childText("iv").flatMap { Data(base64Encoded: $0) }
+        return Message(senderDeviceID: sid, keys: keys, payload: payload, iv: iv)
     }
 }

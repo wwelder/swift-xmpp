@@ -142,4 +142,21 @@ final class OMEMOEngineTests: XCTestCase {
             XCTAssertEqual(error as? OMEMOError, .untrustedSignedPreKey)
         }
     }
+
+    /// Interop invariant a self-consistent round trip can't catch: every public
+    /// key in a published bundle — one-time prekeys included — must be in
+    /// libsignal network format (33 bytes, 0x05 prefix), or real clients
+    /// (python-omemo, Dino) reject the whole bundle at parse time.
+    func testPublishedBundleKeysAreInNetworkFormat() async throws {
+        let bundle = try await OMEMOEngine().bundle()
+        XCTAssertEqual(bundle.identityKey.count, 33)
+        XCTAssertEqual(bundle.identityKey.first, 0x05)
+        XCTAssertEqual(bundle.signedPreKeyPublic.count, 33)
+        XCTAssertEqual(bundle.signedPreKeyPublic.first, 0x05)
+        XCTAssertFalse(bundle.preKeys.isEmpty)
+        for pk in bundle.preKeys {
+            XCTAssertEqual(pk.publicKey.count, 33, "prekey \(pk.id) not network format")
+            XCTAssertEqual(pk.publicKey.first, 0x05, "prekey \(pk.id) missing 0x05 prefix")
+        }
+    }
 }

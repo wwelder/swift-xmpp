@@ -36,8 +36,10 @@ import Foundation
 /// the DH inputs swapped, which is the whole trick and the whole hazard.
 enum X3DH {
     /// OMEMO uses the legacy libsignal KDF: HKDF-SHA-256 with an all-zero salt
-    /// and a 32-byte 0xFF prefix on the input keying material.
-    static let info = Data("OMEMO X3DH".utf8)
+    /// and a 32-byte 0xFF prefix on the input keying material. The info string
+    /// is libsignal's "WhisperText" verbatim — the byte-for-byte value real
+    /// clients derive under, not a descriptive name of our own.
+    static let info = Data("WhisperText".utf8)
 
     /// What the recipient of a signed-prekey bundle needs to start a session.
     struct Bundle {
