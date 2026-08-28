@@ -93,6 +93,11 @@ public struct Message: Identifiable, Equatable, Sendable {
     public let isOutgoing: Bool
     public let timestamp: Date
 
+    public init(id: String, counterpart: String, body: String, isOutgoing: Bool, timestamp: Date) {
+        self.id = id; self.counterpart = counterpart; self.body = body
+        self.isOutgoing = isOutgoing; self.timestamp = timestamp
+    }
+
     init?(from stanza: Stanza, ourBareJID: String) {
         // A message with no body is a real and common thing — chat states,
         // receipts, markers — and is not a message to show.

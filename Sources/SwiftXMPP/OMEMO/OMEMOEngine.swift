@@ -72,6 +72,10 @@ public actor OMEMOEngine {
 
     public var identityPublicKey: Data { identity.publicKey }
 
+    /// The 32-byte seed to persist. Restoring from it reconstructs the same
+    /// identity and therefore the same published key.
+    public var identitySeed: Data { identity.rawRepresentation }
+
     /// Our bundle to publish. The one-time prekeys are all we currently hold;
     /// each is consumed the first time a peer uses it.
     public func bundle() throws -> OMEMOBundle {

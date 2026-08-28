@@ -39,6 +39,7 @@ public actor XMPPSession {
         static let forward = "urn:xmpp:forward:0"
         static let push = "urn:xmpp:push:0"
         static let dataForms = "jabber:x:data"
+        static let omemo = OMEMONamespace.encrypted
     }
 
     public enum Failure: Error, LocalizedError {
@@ -386,6 +387,101 @@ public actor XMPPSession {
     /// Whether the server offered XEP-0357 in disco#info.
     public private(set) var supportsPush = false
 
+    // MARK: OMEMO
+
+    private var omemo: OMEMOEngine?
+    private var omemoStore: OMEMOKeyStore?
+
+    /// Turn on OMEMO for this session: create or restore our identity and
+    /// device, publish our bundle, and add our device id to the list, so peers
+    /// can start encrypting to us. Idempotent.
+    ///
+    /// `store` persists the identity across launches; without it every launch
+    /// is a new device, which peers see as a new unverified key.
+    public func enableOMEMO(store: OMEMOKeyStore) async throws {
+        guard omemo == nil else { return }
+        omemoStore = store
+        let engine: OMEMOEngine
+        if let saved = store.loadIdentity() {
+            engine = OMEMOEngine(identity: saved.identity, deviceID: saved.deviceID)
+        } else {
+            engine = OMEMOEngine()
+            await store.saveIdentity(seed: engine.identitySeed, deviceID: engine.deviceID)
+        }
+        await engine.setBundleSource(PEPBundleSource(session: self))
+        omemo = engine
+        try await publishOMEMOBundle()
+        try await addSelfToDeviceList()
+    }
+
+    private func publishOMEMOBundle() async throws {
+        guard let omemo else { return }
+        let bundle = try await omemo.bundle()
+        _ = try await sendIQ(type: "set", child: OMEMOPublishing.publishBundle(bundle, deviceID: omemo.deviceID))
+    }
+
+    /// Add our device id to the published list without dropping the ids already
+    /// there. Overwriting the list makes our other devices vanish for everyone,
+    /// which is the classic OMEMO footgun.
+    private func addSelfToDeviceList() async throws {
+        guard let omemo else { return }
+        let existing = (try? await fetchDeviceList(for: ourBareJID)) ?? []
+        let ids = existing.contains(omemo.deviceID) ? existing : existing + [omemo.deviceID]
+        _ = try await sendIQ(type: "set", child: OMEMOPublishing.publishDeviceList(ids))
+    }
+
+    func fetchDeviceList(for jid: String) async throws -> [UInt32] {
+        let reply = try await sendIQ(type: "get", to: jid, child: OMEMOPublishing.fetchDeviceList())
+        return OMEMOPublishing.parseDeviceList(reply.child("pubsub") ?? reply)
+    }
+
+    func fetchBundle(for jid: String, deviceID: UInt32) async throws -> OMEMOBundle {
+        let reply = try await sendIQ(type: "get", to: jid, child: OMEMOPublishing.fetchBundle(deviceID: deviceID))
+        guard let bundle = OMEMOPublishing.parseBundle(reply.child("pubsub") ?? reply) else {
+            throw OMEMOError.malformedMessage
+        }
+        return bundle
+    }
+
+    /// Send an OMEMO-encrypted message. The body never appears in the clear;
+    /// the optional plaintext fallback is only a hint for clients that cannot
+    /// do OMEMO, and callers who want no fallback pass none.
+    @discardableResult
+    public func sendEncrypted(_ body: String, to jid: String, plaintextFallback: Bool = false) async throws -> Message {
+        guard let omemo else { throw OMEMOError.malformedMessage }
+        let encrypted = try await omemo.encrypt(Data(body.utf8), for: jid)
+        let id = UUID().uuidString
+        var children: [Stanza] = [encrypted.element()]
+        if plaintextFallback {
+            children.append(Stanza("body", text: "This message is OMEMO-encrypted."))
+        }
+        // EME (XEP-0380): tell a receiving client what it failed to decrypt.
+        children.append(Stanza("encryption", ["xmlns": "urn:xmpp:eme:0", "namespace": Namespace.omemo]))
+        sendCounted(Stanza("message", ["to": jid, "type": "chat", "id": id, "from": ourBareJID], children: children))
+        requestAcknowledgement()
+        return Message(id: id, counterpart: jid, body: body, isOutgoing: true, timestamp: Date())
+    }
+
+    private func handleEncryptedMessage(_ element: Stanza, from bareFrom: String) async {
+        guard let omemo,
+              let encryptedElement = element.child("encrypted", xmlns: Namespace.omemo),
+              let encrypted = EncryptedElement.parse(encryptedElement)
+        else { return }
+        do {
+            guard let plaintext = try await omemo.decrypt(encrypted, from: bareFrom) else { return }
+            emit(.message(Message(
+                id: element.id ?? UUID().uuidString, counterpart: bareFrom,
+                body: String(decoding: plaintext, as: UTF8.self), isOutgoing: false, timestamp: Date()
+            )))
+        } catch {
+            emit(.message(Message(
+                id: element.id ?? UUID().uuidString, counterpart: bareFrom,
+                body: "[could not decrypt this OMEMO message]", isOutgoing: false, timestamp: Date()
+            )))
+        }
+    }
+
+
     /// Ask the server to confirm what it has handled. Worth doing before the
     /// app goes to the background: the answer decides whether a message the
     /// user just sent is safe or needs resending.
@@ -700,6 +796,12 @@ public actor XMPPSession {
     private func route(_ element: Stanza) {
         switch element.name {
         case "message":
+            if element.child("encrypted", xmlns: Namespace.omemo) != nil {
+                let from = element.from ?? ""
+                let bareFrom = from.split(separator: "/").first.map(String.init) ?? from
+                Task { await handleEncryptedMessage(element, from: bareFrom) }
+                return
+            }
             if let carbon = Self.unwrapCarbon(element, ourBareJID: ourBareJID) {
                 if let message = Message(from: carbon, ourBareJID: ourBareJID) {
                     emit(.message(message))
