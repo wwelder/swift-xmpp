@@ -60,12 +60,22 @@ public actor XMPPSession {
         }
     }
 
-    private let transport = StreamTransport()
+    private var transport = StreamTransport()
     private var parser = StreamParser()
 
     private var features: Stanza?
     private var isSecure = false
     private var management = StreamManagement()
+
+    /// Kept so the session can re-establish itself without asking the caller
+    /// to hold credentials and hand them back. A client that makes the user
+    /// retype a password because a train went into a tunnel is not finished.
+    private var jid: JID?
+    private var credential: Credential?
+    private var pin: String?
+    private var reconnectAttempt = 0
+    private var isReconnecting = false
+    private var deliberatelyClosed = false
 
     /// Whether the server will hold our session open across a dropped
     /// connection. Callers show this: "reconnecting" and "signed out" are very
@@ -93,6 +103,13 @@ public actor XMPPSession {
         case rosterChanged(Contact)
         case presence(ContactPresence)
         case message(Message)
+        /// The connection dropped and we are trying to get it back. Distinct
+        /// from `disconnected`, because a spinner and a login screen are very
+        /// different answers to the same event.
+        case reconnecting(attempt: Int)
+        /// Back, with the same session: nothing was lost and nothing needs
+        /// refetching.
+        case resumed
         case disconnected(reason: String)
     }
 
@@ -113,12 +130,16 @@ public actor XMPPSession {
     public func connect(
         jid: JID, credential: Credential, pinnedCertificateSHA256: String? = nil
     ) async throws -> ServerCapabilities {
+        self.jid = jid
+        self.credential = credential
+        pin = pinnedCertificateSHA256
+        deliberatelyClosed = false
         transport.pinnedCertificateSHA256 = pinnedCertificateSHA256
         transport.onBytes = { [weak self] data in
             Task { await self?.ingest(data) }
         }
         transport.onError = { [weak self] error in
-            Task { await self?.failAllWaiters(with: error) }
+            Task { await self?.handleTransportFailure(error) }
         }
 
         try await transport.connect(host: jid.domain, port: 5222, directTLS: false)
@@ -143,6 +164,7 @@ public actor XMPPSession {
     }
 
     public func disconnect() {
+        deliberatelyClosed = true
         transport.send("</stream:stream>")
         transport.close()
     }
@@ -376,6 +398,107 @@ public actor XMPPSession {
             Stanza("iq", ["type": "get", "id": id, "to": jid], children: [query]).xml
         )
         return try await waitForIQ(id: id)
+    }
+
+    /// Drop the socket the way a lost network does: no stream close, no
+    /// warning to the server, which then holds the session open for its resume
+    /// window. Exists because resumption is otherwise only testable by
+    /// physically interrupting a network, and an untested recovery path is a
+    /// recovery path that does not work.
+    public func simulateConnectionLoss() {
+        transport.close()
+        Task { await handleTransportFailure(StreamTransport.Failure.closedByPeer) }
+    }
+
+    // MARK: staying connected
+
+    /// The connection went away. Whether that is recoverable is the whole
+    /// question, and stream management is what makes the answer "usually yes".
+    private func handleTransportFailure(_ error: Error) async {
+        // Waiters must fail now: something is awaiting a reply that will never
+        // come, and leaving them suspended is a hang rather than an error.
+        failAllWaiters(with: error)
+
+        guard !deliberatelyClosed, !isReconnecting else { return }
+        guard management.resumeToken != nil, let jid, let credential else {
+            emit(.disconnected(reason: error.localizedDescription))
+            return
+        }
+
+        isReconnecting = true
+        defer { isReconnecting = false }
+
+        // Bounded, and it backs off: a client that retries a dead server every
+        // second is a client that drains a battery and annoys an operator.
+        // The ceiling matches what a server typically holds a session for.
+        while reconnectAttempt < 6 {
+            reconnectAttempt += 1
+            emit(.reconnecting(attempt: reconnectAttempt))
+            let delay = min(pow(2.0, Double(reconnectAttempt - 1)), 30)
+            try? await Task.sleep(for: .seconds(delay))
+            if deliberatelyClosed { return }
+
+            do {
+                try await resumeSession(jid: jid, credential: credential)
+                reconnectAttempt = 0
+                emit(.resumed)
+                return
+            } catch {
+                continue
+            }
+        }
+
+        emit(.disconnected(reason: "Could not reconnect."))
+    }
+
+    /// Reconnect and pick the old session back up.
+    ///
+    /// The order is the XEP's: TLS and SASL happen again exactly as they did
+    /// the first time — resumption replaces resource binding, not
+    /// authentication. Getting this wrong produces a client that appears to
+    /// resume and is in fact unauthenticated.
+    private func resumeSession(jid: JID, credential: Credential) async throws {
+        transport.close()
+        transport = StreamTransport()
+        transport.pinnedCertificateSHA256 = pin
+        transport.onBytes = { [weak self] data in
+            Task { await self?.ingest(data) }
+        }
+        transport.onError = { [weak self] error in
+            Task { await self?.handleTransportFailure(error) }
+        }
+        isSecure = false
+
+        try await transport.connect(host: jid.domain, port: 5222, directTLS: false)
+        try await openStream(to: jid.domain)
+        guard features?.firstDescendant(xmlns: Namespace.tls) != nil else {
+            throw Failure.insecureServer
+        }
+        try await negotiateTLS(domain: jid.domain)
+        try await authenticate(
+            jid: jid, credential: credential, mechanisms: offeredMechanisms()
+        )
+        try await openStream(to: jid.domain)
+
+        guard let request = management.resumeRequest() else {
+            throw Failure.unexpected("no resumable session")
+        }
+        transport.send(request)
+        let reply = try await waitForElement { $0.xmlns == Namespace.streamManagement }
+
+        guard reply.name == "resumed" else {
+            // The server has forgotten us. Everything queued belongs to a
+            // stream that no longer exists, so it is dropped rather than
+            // replayed into a new one, and the caller starts over.
+            management.handleFailed()
+            throw Failure.unexpected("the session could not be resumed")
+        }
+
+        // Anything the server never saw goes out again. This is the payoff:
+        // messages sent into a dying connection are not silently lost.
+        for stanza in management.handleResumed(reply) {
+            transport.send(stanza)
+        }
     }
 
     // MARK: stream plumbing
