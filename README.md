@@ -26,6 +26,10 @@ capabilities.services         // disco#items
 | RFC 6120 | stream negotiation, STARTTLS, SASL, resource binding |
 | RFC 5802 / 7677 | SCRAM-SHA-1 and SCRAM-SHA-256, with the official test vectors |
 | XEP-0030 | service discovery |
+| XEP-0198 | stream management, with resumption after a dropped connection |
+| XEP-0280 | message carbons |
+| XEP-0352 | client state indication |
+| XEP-0357 | push registration (the client's half) |
 
 STARTTLS is why the transport uses CFStream rather than Network.framework:
 `NWConnection` fixes its security parameters at creation and cannot upgrade a
@@ -34,10 +38,24 @@ on port 5222.
 
 ## What it does not do yet
 
-Roster, presence and messages are next. Stream management (XEP-0198), message
-archives (XEP-0313) and carbons (XEP-0280) after that. There is no OMEMO, and
-there will not be a hand-rolled one — an end-to-end encryption protocol is not
-a thing to implement casually.
+Message archives (XEP-0313) are not implemented. OMEMO (XEP-0384) is in
+progress, and deserves a word about how.
+
+End-to-end encryption is not a thing to implement casually, and none of the
+primitives here are ours: X25519, Ed25519, HKDF, HMAC and AES all come from
+CryptoKit. What CryptoKit lacks is XEdDSA — signing with the same Curve25519
+key used for agreement, which OMEMO requires — and the map between the curve's
+Montgomery and Edwards forms that XEdDSA is built on. The map is about a
+hundred lines of field arithmetic in `OMEMO/FieldElement.swift`. It only ever
+touches other people's public keys, never a secret, and it is checked against
+CryptoKit itself: the same scalar produces the same point in both forms, and
+the conversion has to agree bit for bit on hundreds of random keys before the
+tests pass. Our own private keys never leave CryptoKit.
+
+The protocol above that — X3DH, the Double Ratchet, and OMEMO's framing — is
+written from the published Signal specifications and the XEP. It is not done
+until it has exchanged messages with an existing OMEMO client, and the tests
+say so.
 
 ## Two decisions worth knowing about
 
