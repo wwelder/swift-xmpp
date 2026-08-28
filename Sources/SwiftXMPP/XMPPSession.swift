@@ -34,6 +34,7 @@ public actor XMPPSession {
         static let discoInfo = "http://jabber.org/protocol/disco#info"
         static let discoItems = "http://jabber.org/protocol/disco#items"
         static let streamManagement = StreamManagement.namespace
+        static let clientState = "urn:xmpp:csi:0"
     }
 
     enum Failure: Error, LocalizedError {
@@ -76,6 +77,20 @@ public actor XMPPSession {
     private var reconnectAttempt = 0
     private var isReconnecting = false
     private var deliberatelyClosed = false
+
+    /// Whether the server will act on client state, and what we last told it.
+    private var supportsClientState = false
+    private var clientState: ClientState = .active
+
+    /// XEP-0352. What the client is doing, from the server's point of view.
+    public enum ClientState: Sendable {
+        /// Someone is looking at the screen. Send everything.
+        case active
+        /// Backgrounded or asleep. The server may hold back or coalesce the
+        /// traffic that only matters to a visible UI - presence churn, typing
+        /// notifications - and deliver it when we come back.
+        case inactive
+    }
 
     /// Whether the server will hold our session open across a dropped
     /// connection. Callers show this: "reconnecting" and "signed out" are very
@@ -158,6 +173,7 @@ public actor XMPPSession {
         try await authenticate(jid: jid, credential: credential, mechanisms: mechanisms)
         try await openStream(to: jid.domain) // §6.4.6: restart after SASL success
         try await bindResource()
+        supportsClientState = features?.firstDescendant(xmlns: Namespace.clientState) != nil
         await enableStreamManagement()
 
         return try await discoverCapabilities(domain: jid.domain, mechanisms: mechanisms)
@@ -303,6 +319,23 @@ public actor XMPPSession {
             $0.xmlns == Namespace.streamManagement
         }), reply.name == "enabled" else { return }
         management.handleEnabled(reply)
+    }
+
+    /// Tell the server whether anyone is looking.
+    ///
+    /// Worth doing on every foreground and background transition. On mobile the
+    /// saving is real: presence churn in a busy roster and typing notifications
+    /// are most of the traffic a backgrounded client would otherwise wake for,
+    /// and none of it changes anything the user can see.
+    ///
+    /// Silently a no-op when the server does not support it, because a client
+    /// that refuses to run against a plain server is not a generic client.
+    public func setClientState(_ state: ClientState) {
+        clientState = state
+        guard supportsClientState else { return }
+        let element = state == .active ? "active" : "inactive"
+        // Not a stanza, so it is not counted for stream management.
+        transport.send("<\(element) xmlns='\(Namespace.clientState)'/>")
     }
 
     /// Ask the server to confirm what it has handled. Worth doing before the
@@ -499,6 +532,10 @@ public actor XMPPSession {
         for stanza in management.handleResumed(reply) {
             transport.send(stanza)
         }
+        // Re-assert client state. A resumed session may or may not have kept
+        // it, and a client that assumes "active" wakes for everything while a
+        // client that assumes "inactive" goes quiet in the foreground.
+        setClientState(clientState)
     }
 
     // MARK: stream plumbing
