@@ -35,13 +35,18 @@ public actor XMPPSession {
         static let discoItems = "http://jabber.org/protocol/disco#items"
         static let streamManagement = StreamManagement.namespace
         static let clientState = "urn:xmpp:csi:0"
+        static let carbons = "urn:xmpp:carbons:2"
+        static let forward = "urn:xmpp:forward:0"
+        static let push = "urn:xmpp:push:0"
+        static let dataForms = "jabber:x:data"
     }
 
-    enum Failure: Error, LocalizedError {
+    public enum Failure: Error, LocalizedError {
         case noSharedMechanism(offered: [String])
         case authenticationRejected(String)
         case insecureServer
         case unexpected(String)
+        case unsupported(String)
 
         public var errorDescription: String? {
             switch self {
@@ -57,6 +62,8 @@ public actor XMPPSession {
                 "The server does not support encryption, so the connection was refused."
             case let .unexpected(detail):
                 "Unexpected response from the server: \(detail)."
+            case let .unsupported(feature):
+                "This server does not support \(feature)."
             }
         }
     }
@@ -338,6 +345,47 @@ public actor XMPPSession {
         transport.send("<\(element) xmlns='\(Namespace.clientState)'/>")
     }
 
+    /// XEP-0357. Register this device so the server can wake it through an
+    /// app server when a message arrives and the connection is gone.
+    ///
+    /// `service` is the app server's JID and `node` identifies this device to
+    /// it - on Apple platforms, the APNs token. The app server itself is
+    /// infrastructure the app's operator runs (a stock ejabberd cannot reach
+    /// APNs; only the certificate holder can); this is only the client's half.
+    ///
+    /// Throws when the server does not support push, because unlike carbons or
+    /// client state this is something the user needs to know about: without it
+    /// a backgrounded phone receives nothing, and they should be told rather
+    /// than left to conclude the app is broken.
+    public func enablePush(service: String, node: String, secret: String? = nil) async throws {
+        guard supportsPush else { throw Failure.unsupported("push notifications") }
+        var options: [Stanza] = [
+            Stanza("field", ["var": "FORM_TYPE"],
+                   children: [Stanza("value", text: "http://jabber.org/protocol/pubsub#publish-options")]),
+        ]
+        if let secret {
+            options.append(Stanza("field", ["var": "secret"], children: [Stanza("value", text: secret)]))
+        }
+        let id = UUID().uuidString
+        sendCounted(Stanza("iq", ["type": "set", "id": id], children: [
+            Stanza("enable", ["xmlns": Namespace.push, "jid": service, "node": node], children: [
+                Stanza("x", ["xmlns": Namespace.dataForms, "type": "submit"], children: options),
+            ]),
+        ]))
+        _ = try await waitForIQ(id: id)
+    }
+
+    public func disablePush(service: String, node: String? = nil) async throws {
+        var attrs = ["xmlns": Namespace.push, "jid": service]
+        if let node { attrs["node"] = node }
+        let id = UUID().uuidString
+        sendCounted(Stanza("iq", ["type": "set", "id": id], children: [Stanza("disable", attrs)]))
+        _ = try await waitForIQ(id: id)
+    }
+
+    /// Whether the server offered XEP-0357 in disco#info.
+    public private(set) var supportsPush = false
+
     /// Ask the server to confirm what it has handled. Worth doing before the
     /// app goes to the background: the answer decides whether a message the
     /// user just sent is safe or needs resending.
@@ -360,6 +408,16 @@ public actor XMPPSession {
 
         let features = await info?.child("query")?.childrenNamed("feature")
             .compactMap { $0["var"] } ?? []
+
+        // XEP-0357 §4: push support is advertised on the *account*, not the
+        // server. A client that only asks the domain concludes no server
+        // supports push, and that is a wrong answer that looks like a right
+        // one on every server it is tested against.
+        let account = try? await request(
+            to: ourBareJID, query: Stanza("query", ["xmlns": Namespace.discoInfo])
+        )
+        supportsPush = account?.child("query")?.childrenNamed("feature")
+            .contains { $0["var"] == Namespace.push } ?? false
         let services = await items?.child("query")?.childrenNamed("item")
             .compactMap { $0["jid"] } ?? []
 
@@ -379,7 +437,22 @@ public actor XMPPSession {
         let reply = try await request(to: ourBareJID, query: Stanza("query", ["xmlns": "jabber:iq:roster"]))
         let contacts = reply.child("query")?.children.compactMap(Contact.init) ?? []
         emit(.rosterLoaded(contacts))
+        await enableCarbons()
         sendCounted(Stanza("presence"))
+    }
+
+    /// XEP-0280. Ask the server to copy us on conversations happening on our
+    /// other devices, in both directions, so a reply typed on a laptop shows
+    /// up in the phone's thread instead of the thread going silent.
+    ///
+    /// Failure is not an error: a server without carbons is a server where
+    /// each device sees only its own half, which is how it worked before and
+    /// still works.
+    private func enableCarbons() async {
+        let id = UUID().uuidString
+        sendCounted(Stanza("iq", ["type": "set", "id": id],
+                           children: [Stanza("enable", ["xmlns": Namespace.carbons])]))
+        _ = try? await waitForIQ(id: id)
     }
 
     /// Send a chat message. Returns the id it was sent with, so a caller can
@@ -598,13 +671,34 @@ public actor XMPPSession {
         route(element)
     }
 
+    /// A carbon is a message from *our own account* wrapping a copy of a
+    /// message one of our other devices sent or received. Returns the inner
+    /// message, or nil if this is not a carbon.
+    ///
+    /// The outer `from` must be our own bare JID (XEP-0280 §11). Without that
+    /// check anyone can send a message that *looks* like a carbon and have the
+    /// client display it as something we said or received elsewhere - a
+    /// forged conversation, complete with our name on it.
+    static func unwrapCarbon(_ element: Stanza, ourBareJID: String) -> Stanza? {
+        guard let wrapper = element.child("received", xmlns: Namespace.carbons)
+                ?? element.child("sent", xmlns: Namespace.carbons) else { return nil }
+        let from = element.from ?? ""
+        let bareFrom = from.split(separator: "/").first.map(String.init) ?? from
+        guard bareFrom == ourBareJID else { return nil }
+        return wrapper.child("forwarded", xmlns: Namespace.forward)?.child("message")
+    }
+
     /// Anything nobody was waiting for. This is most of the traffic in a live
     /// session: contacts coming and going, messages arriving, the server
     /// pushing roster changes.
     private func route(_ element: Stanza) {
         switch element.name {
         case "message":
-            if let message = Message(from: element, ourBareJID: ourBareJID) {
+            if let carbon = Self.unwrapCarbon(element, ourBareJID: ourBareJID) {
+                if let message = Message(from: carbon, ourBareJID: ourBareJID) {
+                    emit(.message(message))
+                }
+            } else if let message = Message(from: element, ourBareJID: ourBareJID) {
                 emit(.message(message))
             }
         case "presence":
