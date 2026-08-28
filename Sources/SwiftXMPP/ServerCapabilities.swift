@@ -15,13 +15,12 @@
 
 import Foundation
 
-/// What a server told us about itself, and what the app should therefore show.
+/// What a server told us about itself.
 ///
-/// This is the whole design in one file. The app never asks "is this Channel?"
-/// by looking at a hostname — it asks the server what it supports and believes
-/// the answer. A Channel server is just a server that happens to advertise
-/// Channel services; any other server gets the plain client, and neither case
-/// is special-cased anywhere else in the app.
+/// A client should decide what it can offer from this, not from a hostname it
+/// was built with. A server that advertises an extension supports it; one that
+/// does not, does not — and that holds equally for the server the client was
+/// written for and for one it has never seen.
 public struct ServerCapabilities: Equatable {
     /// SASL mechanisms from the stream features, in the order the server listed them.
     let saslMechanisms: [String]
@@ -71,49 +70,15 @@ extension ServerCapabilities {
         return .unsupported(offered: saslMechanisms)
     }
 
-    /// Whether to reveal the Channel surfaces. Presence of the service in
-    /// disco is the signal; when the server grows real `urn:channel:*` feature
-    /// vars this reads them instead, and nothing else in the app changes.
-    var hasChannelExtensions: Bool {
-        features.contains { $0.hasPrefix("urn:channel:") }
-            || services.contains { $0.hasPrefix("channel.") }
-    }
-}
-
-/// The tabs a session shows. Derived, never stored — so a server that gains or
-/// loses a capability is reflected on the next connect without migration.
-public enum Surface: String, CaseIterable, Identifiable {
-    case chats, contacts, feed, create, images
-
-    public var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .chats: "Chats"
-        case .contacts: "Contacts"
-        case .feed: "Feed"
-        case .create: "Create"
-        case .images: "Images"
+    /// Whether the server advertises a given extension, by feature var or by
+    /// the presence of a service. Callers use this to decide what to show.
+    public func advertises(featurePrefix: String? = nil, servicePrefix: String? = nil) -> Bool {
+        if let featurePrefix, features.contains(where: { $0.hasPrefix(featurePrefix) }) {
+            return true
         }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .chats: "bubble.left.and.bubble.right"
-        case .contacts: "person.2"
-        case .feed: "sparkles.rectangle.stack"
-        case .create: "plus.circle"
-        case .images: "photo.on.rectangle"
+        if let servicePrefix, services.contains(where: { $0.hasPrefix(servicePrefix) }) {
+            return true
         }
-    }
-
-    /// Every server gets these. They are the client.
-    static let baseline: [Surface] = [.chats, .contacts]
-    /// These arrive with a server that advertises them, and their code is
-    /// downloaded on demand rather than shipped to everyone.
-    static let channel: [Surface] = [.feed, .create, .images]
-
-    static func available(for capabilities: ServerCapabilities) -> [Surface] {
-        capabilities.hasChannelExtensions ? baseline + channel : baseline
+        return false
     }
 }

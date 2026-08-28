@@ -24,10 +24,11 @@ import Foundation
 /// negotiation is exactly that upgrade, and it is what nearly every server
 /// offers on 5222. CFStream can enable TLS on a live socket.
 ///
-/// Certificates are validated by the system. A generic client talks to servers
-/// run by strangers, so accepting an unverified certificate — as the Channel
-/// app's XMPP layer does — would expose the SASL exchange to anyone on the
-/// path.
+/// Certificates are validated by the system. A client that talks to servers run
+/// by strangers has to verify them: accepting an unverified certificate exposes
+/// the whole session, the SASL exchange included, to anyone on the path. It is
+/// a common shortcut in clients built against a single known server, and it
+/// does not survive contact with a generic one.
 final class StreamTransport: NSObject, StreamDelegate {
     enum Failure: Error, LocalizedError {
         case cannotConnect(host: String, port: Int)
@@ -44,10 +45,11 @@ final class StreamTransport: NSObject, StreamDelegate {
     }
 
     /// SHA-256 of a certificate to accept in addition to the system's anchors.
-    /// Certificate pinning is a legitimate feature — a self-hosted server with
-    /// a private CA is the normal case in XMPP — but it is set here only by the
-    /// debug rig, and the UI for a user to review and pin a certificate the way
-    /// Conversations and Monal do is still to come.
+    ///
+    /// Self-hosted XMPP servers commonly use a private CA, so pinning is a real
+    /// feature rather than a test hook. It is deliberately a single explicit
+    /// certificate and not a blanket "trust anything" switch: the caller has to
+    /// name what it is trusting.
     var pinnedCertificateSHA256: String?
 
     private var input: InputStream?
