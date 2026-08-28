@@ -88,16 +88,23 @@ public struct IdentityKey {
     /// Montgomery form they published. This is the XEdDSA verification path:
     /// convert to Edwards with the sign bit clear, then verify as Ed25519.
     public static func verify(_ signature: Data, for data: Data, publicKey: Data) -> Bool {
-        guard publicKey.count == 32,
-              let edwards = Curve25519Conversion.edwardsPublicKey(fromMontgomery: publicKey),
-              let key = try? Curve25519.Signing.PublicKey(rawRepresentation: edwards) else {
+        guard publicKey.count == 32, signature.count == 64,
+              var edwards = Curve25519Conversion.edwardsPublicKey(fromMontgomery: publicKey) else {
             return false
         }
-        // NOTE: CryptoKit rejects a subset of valid XEdDSA signatures that
-        // libsodium/pyca accept, so this verifies our own and many peers' keys
-        // but not all real OMEMO clients. A standalone Ed25519 verifier is the
-        // fix and is tracked separately; it must not ship half-debugged.
-        return key.isValidSignature(signature, for: data)
+        // XEdDSA (libsignal) convention: the montgomery public key fixes only y,
+        // so the sign of x is carried in bit 255 of s. Recover it, clear it from
+        // the scalar, and set it on the Edwards public key we reconstruct — then
+        // it is an ordinary Ed25519 signature. Our own signatures have this bit
+        // clear (sign forced to 0), so they pass through unchanged.
+        var sig = signature
+        let signBit = sig[sig.startIndex + 63] & 0x80
+        sig[sig.startIndex + 63] &= 0x7F
+        edwards[edwards.startIndex + 31] = (edwards[edwards.startIndex + 31] & 0x7F) | signBit
+
+        // Cofactored check (RFC 8032 §5.1.7), because CryptoKit rejects a subset
+        // of valid XEdDSA signatures that libsodium and pyca accept.
+        return Ed25519Verify.isValid(signature: sig, message: data, publicKey: edwards)
     }
 
     // MARK: agreement
