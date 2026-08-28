@@ -26,7 +26,7 @@ final class OMEMOWireTests: XCTestCase {
         let stanza = OMEMOPublishing.publishDeviceList([111, 222, 333])
         // The published element, wrapped as it comes back from a fetch.
         let list = stanza.child("publish")!.child("item")!.child("list")!
-        let items = Stanza("items", children: [Stanza("item", children: [list])])
+        let items = Stanza("pubsub", children: [Stanza("items", children: [Stanza("item", children: [list])])])
         XCTAssertEqual(OMEMOPublishing.parseDeviceList(items), [111, 222, 333])
     }
 
@@ -40,9 +40,8 @@ final class OMEMOWireTests: XCTestCase {
         )
         let published = OMEMOPublishing.publishBundle(bundle, deviceID: 42)
         let item = published.child("publish")!.child("item")!
-        let asItems = Stanza("items", children: [Stanza("item", children: [item.child("bundle")!])])
-
-        let parsed = OMEMOBundle.parse(asItems.child("item")!.child("bundle")!)
+        let asItems = Stanza("pubsub", children: [Stanza("items", children: [Stanza("item", children: [item.child("bundle")!])])])
+        let parsed = OMEMOPublishing.parseBundle(asItems)
         XCTAssertEqual(parsed?.signedPreKeyID, 7)
         XCTAssertEqual(parsed?.signedPreKeyPublic, bundle.signedPreKeyPublic)
         XCTAssertEqual(parsed?.signedPreKeySignature, bundle.signedPreKeySignature)

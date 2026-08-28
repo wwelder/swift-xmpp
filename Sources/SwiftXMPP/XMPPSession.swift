@@ -390,6 +390,7 @@ public actor XMPPSession {
     // MARK: OMEMO
 
     private var omemo: OMEMOEngine?
+    public var omemoDeviceID: UInt32? { get async { await omemo?.deviceID } }
     private var omemoStore: OMEMOKeyStore?
 
     /// Turn on OMEMO for this session: create or restore our identity and

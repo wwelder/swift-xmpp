@@ -101,8 +101,12 @@ enum OMEMOPublishing {
         return pubsubPublish(node: OMEMONamespace.devicelist, itemID: "current", payload: list)
     }
 
-    static func parseDeviceList(_ items: Stanza) -> [UInt32] {
-        (items.child("item")?.child("list")?.childrenNamed("device") ?? [])
+    static func parseDeviceList(_ pubsub: Stanza) -> [UInt32] {
+        // pubsub > items > item > list > device. The `items` wrapper is easy to
+        // skip and leaves an empty device list that silently encrypts to
+        // nobody, so resolve it explicitly.
+        let item = pubsub.child("items")?.child("item") ?? pubsub.child("item")
+        return (item?.child("list")?.childrenNamed("device") ?? [])
             .compactMap { $0["id"].flatMap { UInt32($0) } }
     }
 
@@ -122,8 +126,9 @@ enum OMEMOPublishing {
         pubsubItems(node: OMEMONamespace.devicelist)
     }
 
-    static func parseBundle(_ items: Stanza) -> OMEMOBundle? {
-        items.child("item")?.child("bundle").flatMap(OMEMOBundle.parse)
+    static func parseBundle(_ pubsub: Stanza) -> OMEMOBundle? {
+        let item = pubsub.child("items")?.child("item") ?? pubsub.child("item")
+        return item?.child("bundle").flatMap(OMEMOBundle.parse)
     }
 
     // MARK: pubsub scaffolding

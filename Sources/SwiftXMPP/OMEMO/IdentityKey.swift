@@ -93,6 +93,10 @@ public struct IdentityKey {
               let key = try? Curve25519.Signing.PublicKey(rawRepresentation: edwards) else {
             return false
         }
+        // NOTE: CryptoKit rejects a subset of valid XEdDSA signatures that
+        // libsodium/pyca accept, so this verifies our own and many peers' keys
+        // but not all real OMEMO clients. A standalone Ed25519 verifier is the
+        // fix and is tracked separately; it must not ship half-debugged.
         return key.isValidSignature(signature, for: data)
     }
 

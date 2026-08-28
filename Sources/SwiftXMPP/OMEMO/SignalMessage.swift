@@ -37,6 +37,14 @@ enum SignalWire {
         guard serialized.count == 33, serialized.first == 0x05 else { return nil }
         return Data(serialized.dropFirst())
     }
+
+    /// The raw 32-byte curve point, whether the input carries the 0x05 prefix
+    /// or not. Peers are inconsistent about which form they publish; this makes
+    /// our reading tolerant without our writing becoming ambiguous.
+    static func normalize(_ key: Data) -> Data {
+        if key.count == 33, key.first == 0x05 { return Data(key.dropFirst()) }
+        return key
+    }
 }
 
 /// A message inside an established session.

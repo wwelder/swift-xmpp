@@ -29,12 +29,12 @@ final class OMEMOSessionTests: XCTestCase {
         let aliceIdentity = IdentityKey()
         let bobIdentity = IdentityKey()
         let bobSignedPreKey = Curve25519.KeyAgreement.PrivateKey()
-        let signature = try bobIdentity.sign(bobSignedPreKey.publicKey.rawRepresentation)
+        let signature = try bobIdentity.sign(SignalWire.serialize(publicKey: bobSignedPreKey.publicKey.rawRepresentation))
         let bobOneTime = Curve25519.KeyAgreement.PrivateKey()
 
         let bundle = X3DH.Bundle(
             identityKey: bobIdentity.publicKey,
-            signedPreKey: bobSignedPreKey.publicKey.rawRepresentation,
+            signedPreKey: SignalWire.serialize(publicKey: bobSignedPreKey.publicKey.rawRepresentation),
             signedPreKeySignature: signature,
             oneTimePreKey: bobOneTime.publicKey.rawRepresentation
         )
@@ -76,7 +76,7 @@ final class OMEMOSessionTests: XCTestCase {
 
         let bundle = X3DH.Bundle(
             identityKey: bob.publicKey,
-            signedPreKey: spk.publicKey.rawRepresentation,
+            signedPreKey: SignalWire.serialize(publicKey: spk.publicKey.rawRepresentation),
             signedPreKeySignature: badSig,
             oneTimePreKey: nil
         )
@@ -172,10 +172,10 @@ final class OMEMOSessionTests: XCTestCase {
         let alice = IdentityKey()
         let bob = IdentityKey()
         let spk = Curve25519.KeyAgreement.PrivateKey()
-        let sig = try bob.sign(spk.publicKey.rawRepresentation)
+        let sig = try bob.sign(SignalWire.serialize(publicKey: spk.publicKey.rawRepresentation))
         let bundle = X3DH.Bundle(
             identityKey: bob.publicKey,
-            signedPreKey: spk.publicKey.rawRepresentation,
+            signedPreKey: SignalWire.serialize(publicKey: spk.publicKey.rawRepresentation),
             signedPreKeySignature: sig,
             oneTimePreKey: nil
         )

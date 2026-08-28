@@ -65,25 +65,30 @@ enum X3DH {
     static func initiate(
         ourIdentity: IdentityKey, theirBundle bundle: Bundle
     ) throws -> InitiatorResult {
+        // Peer keys may arrive with the 0x05 DJB prefix; strip it for the raw
+        // 32-byte curve point, but verify the signature over the serialized
+        // signed prekey exactly as it was signed.
+        let peerIdentity = SignalWire.normalize(bundle.identityKey)
         guard IdentityKey.verify(
-            bundle.signedPreKeySignature, for: bundle.signedPreKey, publicKey: bundle.identityKey
+            bundle.signedPreKeySignature, for: bundle.signedPreKey, publicKey: peerIdentity
         ) else {
             throw OMEMOError.untrustedSignedPreKey
         }
 
         let ephemeral = Curve25519.KeyAgreement.PrivateKey()
+        let peerSignedPreKey = SignalWire.normalize(bundle.signedPreKey)
 
-        let dh1 = try ourIdentity.sharedSecret(with: bundle.signedPreKey)
+        let dh1 = try ourIdentity.sharedSecret(with: peerSignedPreKey)
         let dh2 = try ephemeral.sharedSecretFromKeyAgreement(
-            with: Curve25519.KeyAgreement.PublicKey(rawRepresentation: bundle.identityKey)
+            with: Curve25519.KeyAgreement.PublicKey(rawRepresentation: peerIdentity)
         )
         let dh3 = try ephemeral.sharedSecretFromKeyAgreement(
-            with: Curve25519.KeyAgreement.PublicKey(rawRepresentation: bundle.signedPreKey)
+            with: Curve25519.KeyAgreement.PublicKey(rawRepresentation: peerSignedPreKey)
         )
         var ikm = concat(dh1, dh2, dh3)
         if let opk = bundle.oneTimePreKey {
             let dh4 = try ephemeral.sharedSecretFromKeyAgreement(
-                with: Curve25519.KeyAgreement.PublicKey(rawRepresentation: opk)
+                with: Curve25519.KeyAgreement.PublicKey(rawRepresentation: SignalWire.normalize(opk))
             )
             ikm += dh4.withUnsafeBytes { Data($0) }
         }
@@ -107,16 +112,16 @@ enum X3DH {
         theirEphemeralPublicKey: Data
     ) throws -> SymmetricKey {
         let theirIdentity = try Curve25519.KeyAgreement.PublicKey(
-            rawRepresentation: theirIdentityPublicKey
+            rawRepresentation: SignalWire.normalize(theirIdentityPublicKey)
         )
         let theirEphemeral = try Curve25519.KeyAgreement.PublicKey(
-            rawRepresentation: theirEphemeralPublicKey
+            rawRepresentation: SignalWire.normalize(theirEphemeralPublicKey)
         )
 
         // DH1: their identity × our signed prekey (mirror of initiator's DH1).
         let dh1 = try ourSignedPreKey.sharedSecretFromKeyAgreement(with: theirIdentity)
         // DH2: their ephemeral × our identity.
-        let dh2 = try ourIdentity.sharedSecret(with: theirEphemeralPublicKey)
+        let dh2 = try ourIdentity.sharedSecret(with: SignalWire.normalize(theirEphemeralPublicKey))
         // DH3: their ephemeral × our signed prekey.
         let dh3 = try ourSignedPreKey.sharedSecretFromKeyAgreement(with: theirEphemeral)
         var ikm = concat(dh1, dh2, dh3)

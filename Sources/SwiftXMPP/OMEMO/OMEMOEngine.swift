@@ -79,11 +79,15 @@ public actor OMEMOEngine {
     /// Our bundle to publish. The one-time prekeys are all we currently hold;
     /// each is consumed the first time a peer uses it.
     public func bundle() throws -> OMEMOBundle {
+        // libsignal convention: keys carry a 0x05 DJB type byte, and the
+        // signed-prekey signature covers that 33-byte serialized form. Both are
+        // required for Conversations/Dino/Gajim to verify us; signing the bare
+        // 32 bytes is the interop bug that looks fine in isolation.
         OMEMOBundle(
             signedPreKeyID: signedPreKeyID,
-            signedPreKeyPublic: signedPreKey.publicKey.rawRepresentation,
-            signedPreKeySignature: try identity.sign(signedPreKey.publicKey.rawRepresentation),
-            identityKey: identity.publicKey,
+            signedPreKeyPublic: SignalWire.serialize(publicKey: signedPreKey.publicKey.rawRepresentation),
+            signedPreKeySignature: try identity.sign(SignalWire.serialize(publicKey: signedPreKey.publicKey.rawRepresentation)),
+            identityKey: SignalWire.serialize(publicKey: identity.publicKey),
             preKeys: oneTimePreKeys.map { ($0.key, $0.value.publicKey.rawRepresentation) }
         )
     }
@@ -182,9 +186,9 @@ public actor OMEMOEngine {
         // assembled in the ratchet's first output, below, via the pre-key path.
         let ratchet = try DoubleRatchet.initiating(
             sharedSecret: result.sharedSecret,
-            remoteRatchetKey: bundle.signedPreKeyPublic,
+            remoteRatchetKey: SignalWire.normalize(bundle.signedPreKeyPublic),
             selfIdentity: identity.publicKey,
-            remoteIdentity: bundle.identityKey
+            remoteIdentity: SignalWire.normalize(bundle.identityKey)
         )
         sessions[key] = ratchet
         pendingPreKeyHeaders[key] = PreKeyContext(
@@ -216,7 +220,7 @@ public actor OMEMOEngine {
 
         var ratchet = DoubleRatchet.responding(
             sharedSecret: secret, ourRatchetPrivate: signedPreKey,
-            selfIdentity: identity.publicKey, remoteIdentity: preKey.identityKey
+            selfIdentity: identity.publicKey, remoteIdentity: SignalWire.normalize(preKey.identityKey)
         )
         let plaintext = try ratchet.decrypt(
             DoubleRatchet.EncryptedMessage(
