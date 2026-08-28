@@ -72,10 +72,39 @@ public actor XMPPSession {
 
     public private(set) var boundJID: String?
 
+    /// Bare JID of this session, used to tell our own messages from others'.
+    private var ourBareJID = ""
+
+    /// What happened on the stream, in order.
+    ///
+    /// One stream rather than a delegate with a dozen methods: a caller that
+    /// wants only messages writes one `for await` and ignores the rest, and a
+    /// caller that wants everything does not have to implement six callbacks
+    /// to get there.
+    public enum Event: Sendable {
+        case rosterLoaded([Contact])
+        case rosterChanged(Contact)
+        case presence(ContactPresence)
+        case message(Message)
+        case disconnected(reason: String)
+    }
+
+    private var eventContinuation: AsyncStream<Event>.Continuation?
+
+    public lazy var events: AsyncStream<Event> = {
+        AsyncStream { continuation in
+            self.eventContinuation = continuation
+        }
+    }()
+
+    private func emit(_ event: Event) {
+        eventContinuation?.yield(event)
+    }
+
     // MARK: negotiation
 
     public func connect(
-        jid: JID, password: String, pinnedCertificateSHA256: String? = nil
+        jid: JID, credential: Credential, pinnedCertificateSHA256: String? = nil
     ) async throws -> ServerCapabilities {
         transport.pinnedCertificateSHA256 = pinnedCertificateSHA256
         transport.onBytes = { [weak self] data in
@@ -98,7 +127,7 @@ public actor XMPPSession {
         try await negotiateTLS(domain: jid.domain)
 
         let mechanisms = offeredMechanisms()
-        try await authenticate(jid: jid, password: password, mechanisms: mechanisms)
+        try await authenticate(jid: jid, credential: credential, mechanisms: mechanisms)
         try await openStream(to: jid.domain) // §6.4.6: restart after SASL success
         try await bindResource()
 
@@ -137,19 +166,32 @@ public actor XMPPSession {
             .childrenNamed("mechanism").map(\.text) ?? []
     }
 
-    private func authenticate(jid: JID, password: String, mechanisms: [String]) async throws {
-        // Strongest first. PLAIN is not in this list: it is only reachable
-        // through the OAuth path, where the credential is a bearer token whose
-        // exposure is bounded, not a password.
-        let preference: [SCRAM.Variant] = [.sha256, .sha1]
-        guard let variant = preference.first(where: { mechanisms.contains($0.rawValue) }) else {
+    private func authenticate(
+        jid: JID, credential: Credential, mechanisms: [String]
+    ) async throws {
+        guard let mechanism = Mechanism.choose(for: credential, from: mechanisms) else {
             throw Failure.noSharedMechanism(offered: mechanisms)
         }
+        // A mechanism that sends the secret as-is is only safe on an encrypted
+        // stream. We always have one by here, but the check is cheap and the
+        // consequence of getting it wrong is the credential in plaintext.
+        guard !mechanism.carriesSecretVerbatim || isSecure else {
+            throw Failure.insecureServer
+        }
 
+        guard let variant = mechanism.scramVariant else {
+            return try await authenticateWithBearerToken(
+                jid: jid, credential: credential, mechanism: mechanism
+            )
+        }
+
+        guard case let .password(password) = credential else {
+            throw Failure.noSharedMechanism(offered: mechanisms)
+        }
         var scram = SCRAM(variant: variant, username: jid.local, password: password)
         let first = scram.clientFirstMessage()
         transport.send(
-            "<auth xmlns='\(Namespace.sasl)' mechanism='\(variant.rawValue)'>"
+            "<auth xmlns='\(Namespace.sasl)' mechanism='\(mechanism.rawValue)'>"
                 + Data(first.utf8).base64EncodedString() + "</auth>"
         )
 
@@ -177,6 +219,33 @@ public actor XMPPSession {
         }
     }
 
+    /// The bearer-token path. `X-OAUTH2` carries the same bytes as PLAIN, and
+    /// `OAUTHBEARER` (RFC 7628) wraps them in a GS2 header; both hand the token
+    /// to the server, which is why the encrypted-stream check above is not
+    /// optional. What mints the token is deliberately outside this library.
+    private func authenticateWithBearerToken(
+        jid: JID, credential: Credential, mechanism: Mechanism
+    ) async throws {
+        guard case let .token(token) = credential else {
+            throw Failure.noSharedMechanism(offered: [mechanism.rawValue])
+        }
+        let payload: String
+        switch mechanism {
+        case .oauthBearer:
+            payload = "n,a=\(jid.local)@\(jid.domain),\u{01}auth=Bearer \(token)\u{01}\u{01}"
+        default:
+            payload = "\u{00}\(jid.local)\u{00}\(token)"
+        }
+        transport.send(
+            "<auth xmlns='\(Namespace.sasl)' mechanism='\(mechanism.rawValue)'>"
+                + Data(payload.utf8).base64EncodedString() + "</auth>"
+        )
+        let outcome = try await waitForElement { $0.xmlns == Namespace.sasl }
+        guard outcome.name == "success" else {
+            throw Failure.authenticationRejected(outcome.children.first?.name ?? "unknown")
+        }
+    }
+
     private func bindResource() async throws {
         let id = UUID().uuidString
         transport.send(
@@ -189,6 +258,7 @@ public actor XMPPSession {
             throw Failure.unexpected("the server bound no resource")
         }
         boundJID = jid
+        ourBareJID = jid.split(separator: "/").first.map(String.init) ?? jid
     }
 
     private func discoverCapabilities(
@@ -213,6 +283,47 @@ public actor XMPPSession {
         )
     }
 
+    // MARK: what a client actually does
+
+    /// Fetch the roster (RFC 6121 §2.1) and announce ourselves.
+    ///
+    /// Presence is sent after the roster on purpose: the server starts pushing
+    /// contact presence the moment we send ours, and receiving presence for a
+    /// contact we do not yet know about means dropping it or guessing.
+    public func start() async throws {
+        let reply = try await request(to: ourBareJID, query: Stanza("query", ["xmlns": "jabber:iq:roster"]))
+        let contacts = reply.child("query")?.children.compactMap(Contact.init) ?? []
+        emit(.rosterLoaded(contacts))
+        transport.send(Stanza("presence").xml)
+    }
+
+    /// Send a chat message. Returns the id it was sent with, so a caller can
+    /// match it to a delivery receipt later.
+    @discardableResult
+    public func send(_ body: String, to jid: String) -> Message? {
+        let id = UUID().uuidString
+        let stanza = Stanza(
+            "message",
+            ["to": jid, "type": "chat", "id": id, "from": ourBareJID],
+            children: [Stanza("body", text: body)]
+        )
+        transport.send(stanza.xml)
+        return Message(from: stanza, ourBareJID: ourBareJID)
+    }
+
+    /// Ask to see a contact's presence. They must accept; `pendingOut` on the
+    /// roster entry is how a client shows that it is waiting.
+    public func requestSubscription(to jid: String) {
+        transport.send(Stanza("presence", ["to": jid, "type": "subscribe"]).xml)
+    }
+
+    /// Answer someone else's request.
+    public func respondToSubscription(from jid: String, accept: Bool) {
+        transport.send(
+            Stanza("presence", ["to": jid, "type": accept ? "subscribed" : "unsubscribed"]).xml
+        )
+    }
+
     private func request(to jid: String, query: Stanza) async throws -> Stanza {
         let id = UUID().uuidString
         transport.send(
@@ -232,6 +343,7 @@ public actor XMPPSession {
                 case let .element(element):
                     deliver(element)
                 case .streamClosed:
+                    emit(.disconnected(reason: "The server closed the connection."))
                     failAllWaiters(with: StreamTransport.Failure.closedByPeer)
                 }
             }
@@ -256,6 +368,37 @@ public actor XMPPSession {
             elementWaiters.remove(at: index)
             continuation.resume(returning: element)
             return
+        }
+        route(element)
+    }
+
+    /// Anything nobody was waiting for. This is most of the traffic in a live
+    /// session: contacts coming and going, messages arriving, the server
+    /// pushing roster changes.
+    private func route(_ element: Stanza) {
+        switch element.name {
+        case "message":
+            if let message = Message(from: element, ourBareJID: ourBareJID) {
+                emit(.message(message))
+            }
+        case "presence":
+            // Subscription handshakes are not availability and must not be
+            // shown as a contact coming online.
+            guard element.type != "subscribe", element.type != "subscribed",
+                  element.type != "unsubscribe", element.type != "unsubscribed" else { return }
+            emit(.presence(ContactPresence(from: element)))
+        case "iq":
+            // A roster push (RFC 6121 §2.1.6). The server sends these when the
+            // roster changes anywhere, including from our other devices.
+            if let item = element.child("query", xmlns: "jabber:iq:roster")?.child("item"),
+               let contact = Contact(item) {
+                emit(.rosterChanged(contact))
+                if let id = element.id {
+                    transport.send(Stanza("iq", ["type": "result", "id": id]).xml)
+                }
+            }
+        default:
+            break
         }
     }
 
