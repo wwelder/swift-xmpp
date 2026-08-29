@@ -60,6 +60,17 @@ public struct Contact: Identifiable, Equatable, Sendable {
         subscription = Subscription(rawValue: item["subscription"] ?? "none") ?? .none
         pendingOut = item["ask"] == "subscribe"
     }
+
+    /// Build a contact directly — for SwiftUI previews, tests, and demo data
+    /// that does not come from a roster stanza.
+    public init(jid: String, name: String? = nil, groups: [String] = [],
+                subscription: Subscription = .both, pendingOut: Bool = false) {
+        self.jid = jid
+        self.name = name
+        self.groups = groups
+        self.subscription = subscription
+        self.pendingOut = pendingOut
+    }
 }
 
 /// Presence of a contact, reduced to what a client actually shows.
